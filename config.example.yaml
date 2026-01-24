@@ -1,0 +1,37 @@
+# mcp-contexts configuration example
+# Copy to config.yaml and customize for your environment
+
+default_environment: homelab
+
+environments:
+  homelab:
+    url: http://mcp-relay:8000
+    description: Personal infrastructure
+    context:
+      networks:
+        allowed: [192.168.0.0/16]
+      omega: false
+
+  prod:
+    url: https://mcp.prod.example.com
+    description: Production infrastructure
+    context:
+      networks:
+        allowed: [10.0.0.0/8]
+        forbidden: [192.168.0.0/16]
+      omega: true # Extra caution for production
+
+  writing:
+    url: http://localhost:8001
+    description: Writing and documentation tools
+    context:
+      omega: false
+
+qdrant:
+  url: http://qdrant:6333
+  collections:
+    sessions: session-memory
+    context: global-context
+
+embedding:
+  model: sentence-transformers/all-MiniLM-L6-v2
