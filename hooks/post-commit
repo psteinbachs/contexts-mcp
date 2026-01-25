@@ -1,0 +1,43 @@
+#!/bin/bash
+# Git post-commit hook - saves session state at each commit
+#
+# Install: ln -sf /path/to/contexts-mcp/hooks/post-commit .git/hooks/post-commit
+#
+# Environment variables:
+#   CONTEXTS_ENV - Active environment (required)
+#   CONTEXTS_URL - contexts-mcp URL (default: http://localhost:8100)
+#   CONTEXTS_HOOK_ENABLED - Set to "false" to disable (default: true)
+
+# Skip if disabled
+if [ "${CONTEXTS_HOOK_ENABLED:-true}" = "false" ]; then
+    exit 0
+fi
+
+# Require environment to be set
+ENV="${CONTEXTS_ENV:-}"
+if [ -z "$ENV" ]; then
+    # Silently skip if no environment configured
+    exit 0
+fi
+
+CONTEXTS_URL="${CONTEXTS_URL:-http://localhost:8100}"
+
+# Gather commit info
+COMMIT_SHA=$(git rev-parse HEAD)
+COMMIT_MSG=$(git log -1 --pretty=%B | head -1 | tr '"' "'")  # Escape quotes
+BRANCH=$(git branch --show-current 2>/dev/null || echo "detached")
+FILES_CHANGED=$(git diff-tree --no-commit-id --name-only -r HEAD 2>/dev/null | wc -l | tr -d ' ')
+
+# Send to contexts-mcp (async, don't block commit)
+curl -s -X POST "$CONTEXTS_URL/hooks/git-commit" \
+    -H "Content-Type: application/json" \
+    -d "{
+        \"environment\": \"$ENV\",
+        \"commit_sha\": \"$COMMIT_SHA\",
+        \"commit_message\": \"$COMMIT_MSG\",
+        \"branch\": \"$BRANCH\",
+        \"files_changed\": $FILES_CHANGED
+    }" > /dev/null 2>&1 &
+
+# Brief confirmation (non-blocking)
+echo "Session saved at ${COMMIT_SHA:0:8}"

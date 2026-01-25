@@ -35,3 +35,18 @@ qdrant:
 
 embedding:
   model: sentence-transformers/all-MiniLM-L6-v2
+
+# Automatic context management
+# Works best with Claude Code autoCompact: false
+auto_context:
+  enabled: true
+
+  # Token usage thresholds (percentage of max context)
+  thresholds:
+    warning: 70    # Suggest saving session
+    critical: 85   # Auto-save and recommend restart
+
+  # Breakpoint hook settings
+  hooks:
+    git_commit: true   # Save on git commits
+    test_result: true  # Save on test completion

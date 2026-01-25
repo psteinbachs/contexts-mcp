@@ -96,6 +96,12 @@ EMBEDDING_MODEL = config.get("embedding", {}).get(
 
 # Default environment
 current_env: str = config.get("default_environment", "development")
+
+# Auto-context configuration
+auto_context_config = config.get("auto_context", {})
+AUTO_CONTEXT_ENABLED = auto_context_config.get("enabled", True)
+THRESHOLD_WARNING = auto_context_config.get("thresholds", {}).get("warning", 70)
+THRESHOLD_CRITICAL = auto_context_config.get("thresholds", {}).get("critical", 85)
 qdrant_client: Optional[QdrantClient] = None
 embedding_model: Optional[SentenceTransformer] = None
 
@@ -115,6 +121,34 @@ class SessionState(BaseModel):
     blockers: Optional[str] = None
     next_steps: Optional[str] = None
     tags: Optional[list[str]] = None
+
+
+class AutoSaveRequest(BaseModel):
+    """Request for automatic context-triggered save."""
+    environment: str
+    used_tokens: int
+    max_tokens: int = 200000
+    inferred_task: Optional[str] = None
+    inferred_context: Optional[str] = None
+
+
+class GitCommitHook(BaseModel):
+    """Git post-commit hook payload."""
+    environment: str
+    commit_sha: str
+    commit_message: str
+    branch: str
+    files_changed: int = 0
+
+
+class TestResultHook(BaseModel):
+    """Test result hook payload."""
+    environment: str
+    passed: bool
+    test_count: int
+    failed_count: int = 0
+    duration_seconds: float = 0.0
+    test_command: Optional[str] = None
 
 
 class RestoreQuery(BaseModel):
@@ -529,6 +563,300 @@ async def mcp_messages(
             }
 
     return JSONResponse(content=result, headers={"X-Meta-Relay-Env": env})
+
+
+# --- Auto Context Management ---
+
+
+def get_context_status(percent: float) -> str:
+    """Get status label for context usage percentage."""
+    if percent < 50:
+        return "healthy"
+    elif percent < THRESHOLD_WARNING:
+        return "ok"
+    elif percent < THRESHOLD_CRITICAL:
+        return "warning"
+    else:
+        return "critical"
+
+
+def get_recommended_action(percent: float) -> dict:
+    """Get recommended action based on context usage."""
+    if percent < THRESHOLD_WARNING:
+        return {"type": "none"}
+    elif percent < THRESHOLD_CRITICAL:
+        return {
+            "type": "save",
+            "message": f"Context at {percent:.0f}%. Consider saving session.",
+            "auto": False,
+        }
+    else:
+        return {
+            "type": "save_and_restart",
+            "message": f"Context at {percent:.0f}%. Save and restart recommended.",
+            "auto": True,
+        }
+
+
+@app.get("/context/usage")
+async def get_context_usage(
+    used_tokens: Optional[int] = Query(None),
+    max_tokens: int = Query(200000),
+    token: Optional[str] = Query(None),
+):
+    """
+    Report context window usage and get recommendations.
+
+    Called by Claude Code hooks to monitor context and trigger auto-saves.
+
+    Args:
+        used_tokens: Current token count (from Claude Code)
+        max_tokens: Maximum context window size (default 200k)
+        token: Session token for environment resolution
+    """
+    if used_tokens is None:
+        return {
+            "error": "used_tokens parameter required",
+            "hint": "Pass current token count from Claude Code",
+            "thresholds": {
+                "warning": THRESHOLD_WARNING,
+                "critical": THRESHOLD_CRITICAL,
+            },
+        }
+
+    percent = (used_tokens / max_tokens) * 100
+    status = get_context_status(percent)
+    action = get_recommended_action(percent)
+
+    # Resolve environment from token if provided
+    env = None
+    if token and token in sessions:
+        env = sessions[token]["env"]
+
+    return {
+        "used": used_tokens,
+        "max": max_tokens,
+        "percent": round(percent, 1),
+        "status": status,
+        "action": action,
+        "environment": env,
+        "thresholds": {
+            "warning": THRESHOLD_WARNING,
+            "critical": THRESHOLD_CRITICAL,
+        },
+    }
+
+
+@app.post("/context/auto-save")
+async def auto_save_context(req: AutoSaveRequest):
+    """
+    Automatic save triggered when approaching context limit.
+
+    Called by hooks when context usage exceeds critical threshold.
+    Saves session state and returns restart instructions.
+    """
+    if not qdrant_client or not embedding_model:
+        raise HTTPException(status_code=503, detail="Qdrant not initialized")
+
+    percent = (req.used_tokens / req.max_tokens) * 100
+
+    # Build session state with auto-generated metadata
+    task = req.inferred_task or f"[Auto-save at {percent:.0f}% context]"
+    context = req.inferred_context or f"Automatic save at {req.used_tokens:,}/{req.max_tokens:,} tokens ({percent:.0f}%)"
+
+    state = SessionState(
+        environment=req.environment,
+        task=task,
+        context=context,
+        next_steps="Continue from auto-save point",
+        tags=["auto-save", f"tokens-{req.used_tokens}"],
+    )
+
+    # Reuse existing save logic
+    text_parts = [f"Environment: {state.environment}", f"Task: {state.task}"]
+    if state.context:
+        text_parts.append(f"Context: {state.context}")
+    if state.next_steps:
+        text_parts.append(f"Next steps: {state.next_steps}")
+
+    text = "\n".join(text_parts)
+    embedding = embedding_model.encode(text).tolist()
+    point_id = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    qdrant_client.upsert(
+        collection_name=QDRANT_SESSIONS,
+        points=[
+            PointStruct(
+                id=point_id,
+                vector=embedding,
+                payload={
+                    "environment": state.environment,
+                    "task": state.task,
+                    "context": state.context,
+                    "blockers": None,
+                    "next_steps": state.next_steps,
+                    "tags": state.tags,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "text": text,
+                    "auto_save": True,
+                    "tokens_at_save": req.used_tokens,
+                },
+            )
+        ],
+    )
+
+    logger.info(f"Auto-saved session at {percent:.0f}% context: {task[:50]}...")
+
+    return {
+        "status": "saved",
+        "session_id": point_id,
+        "percent_at_save": round(percent, 1),
+        "tokens_at_save": req.used_tokens,
+        "restart_command": f"rs {req.environment}",
+        "message": f"Session auto-saved. Run 'rs {req.environment}' to continue.",
+    }
+
+
+# --- Breakpoint Hooks ---
+
+
+@app.post("/hooks/git-commit")
+async def handle_git_commit(hook: GitCommitHook):
+    """
+    Git post-commit hook handler.
+
+    Saves session state tied to the commit for easy restoration.
+    Enables "return to commit X" workflow.
+    """
+    if not qdrant_client or not embedding_model:
+        raise HTTPException(status_code=503, detail="Qdrant not initialized")
+
+    # Build descriptive task from commit info
+    commit_short = hook.commit_sha[:8] if len(hook.commit_sha) >= 8 else hook.commit_sha
+    task = f"Commit: {hook.commit_message[:80]}"
+    context = f"Branch: {hook.branch}, SHA: {commit_short}, Files changed: {hook.files_changed}"
+    tags = ["git-commit", hook.branch, commit_short]
+
+    state = SessionState(
+        environment=hook.environment,
+        task=task,
+        context=context,
+        tags=tags,
+    )
+
+    text_parts = [f"Environment: {state.environment}", f"Task: {state.task}"]
+    if state.context:
+        text_parts.append(f"Context: {state.context}")
+
+    text = "\n".join(text_parts)
+    embedding = embedding_model.encode(text).tolist()
+    point_id = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    qdrant_client.upsert(
+        collection_name=QDRANT_SESSIONS,
+        points=[
+            PointStruct(
+                id=point_id,
+                vector=embedding,
+                payload={
+                    "environment": state.environment,
+                    "task": state.task,
+                    "context": state.context,
+                    "blockers": None,
+                    "next_steps": None,
+                    "tags": state.tags,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "text": text,
+                    "git_commit": True,
+                    "commit_sha": hook.commit_sha,
+                    "branch": hook.branch,
+                },
+            )
+        ],
+    )
+
+    logger.info(f"Saved session at commit {commit_short}: {hook.commit_message[:50]}...")
+
+    return {
+        "status": "saved",
+        "session_id": point_id,
+        "commit": commit_short,
+        "branch": hook.branch,
+    }
+
+
+@app.post("/hooks/test-result")
+async def handle_test_result(hook: TestResultHook):
+    """
+    Test result hook handler.
+
+    Saves session on test completion - both success and failure.
+    Success = natural breakpoint, failure = debugging context preserved.
+    """
+    if not qdrant_client or not embedding_model:
+        raise HTTPException(status_code=503, detail="Qdrant not initialized")
+
+    if hook.passed:
+        task = f"Tests passed: {hook.test_count} tests in {hook.duration_seconds:.1f}s"
+        tags = ["tests-passed", f"count-{hook.test_count}"]
+    else:
+        task = f"Tests failed: {hook.failed_count}/{hook.test_count} failed"
+        tags = ["tests-failed", f"failed-{hook.failed_count}"]
+
+    context = f"Command: {hook.test_command}" if hook.test_command else None
+
+    state = SessionState(
+        environment=hook.environment,
+        task=task,
+        context=context,
+        tags=tags,
+    )
+
+    text_parts = [f"Environment: {state.environment}", f"Task: {state.task}"]
+    if state.context:
+        text_parts.append(f"Context: {state.context}")
+
+    text = "\n".join(text_parts)
+    embedding = embedding_model.encode(text).tolist()
+    point_id = int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    qdrant_client.upsert(
+        collection_name=QDRANT_SESSIONS,
+        points=[
+            PointStruct(
+                id=point_id,
+                vector=embedding,
+                payload={
+                    "environment": state.environment,
+                    "task": state.task,
+                    "context": state.context,
+                    "blockers": None,
+                    "next_steps": None,
+                    "tags": state.tags,
+                    "timestamp": datetime.now(timezone.utc).isoformat(),
+                    "text": text,
+                    "test_result": True,
+                    "tests_passed": hook.passed,
+                    "test_count": hook.test_count,
+                    "failed_count": hook.failed_count,
+                },
+            )
+        ],
+    )
+
+    status_word = "passed" if hook.passed else "failed"
+    logger.info(f"Saved session at test {status_word}: {task}")
+
+    return {
+        "status": "saved",
+        "session_id": point_id,
+        "tests_passed": hook.passed,
+        "test_count": hook.test_count,
+        "failed_count": hook.failed_count,
+    }
+
+
+# --- Session State Management ---
 
 
 @app.post("/ss")

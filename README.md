@@ -261,9 +261,87 @@ networks:
   mcp-network:
 ```
 
+## Automatic Context Management
+
+Never hit context overflow again. contexts-mcp can monitor token usage and auto-save before you run out of space.
+
+### Setup
+
+1. **Disable autoCompact** in Claude Code (recovers ~45k tokens):
+   ```bash
+   claude config set --global autoCompact false
+   ```
+
+2. **Configure thresholds** in config.yaml:
+   ```yaml
+   auto_context:
+     enabled: true
+     thresholds:
+       warning: 70    # Suggest saving
+       critical: 85   # Auto-save + restart
+   ```
+
+3. **Install git hook** (optional - saves on every commit):
+   ```bash
+   ln -sf /path/to/contexts-mcp/hooks/post-commit .git/hooks/post-commit
+   export CONTEXTS_ENV=dev  # Set your environment
+   ```
+
+### Auto-Save API
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/context/usage` | GET | Check token usage, get recommendations |
+| `/context/auto-save` | POST | Emergency save at threshold |
+| `/hooks/git-commit` | POST | Save on git commit |
+| `/hooks/test-result` | POST | Save on test completion |
+
+**Check context usage:**
+```bash
+curl "http://localhost:8100/context/usage?used_tokens=150000&max_tokens=200000"
+```
+
+Response:
+```json
+{
+  "used": 150000,
+  "max": 200000,
+  "percent": 75.0,
+  "status": "warning",
+  "action": {
+    "type": "save",
+    "message": "Context at 75%. Consider saving session."
+  }
+}
+```
+
+**Auto-save (called by hooks):**
+```bash
+curl -X POST http://localhost:8100/context/auto-save \
+  -H "Content-Type: application/json" \
+  -d '{"environment": "dev", "used_tokens": 170000}'
+```
+
+### Hook Scripts
+
+Located in `hooks/`:
+
+- **`context-monitor.sh`** - Check context and auto-save if critical
+- **`post-commit`** - Git hook to save on commits
+- **`test-result.sh`** - Save after test runs
+
+Example git hook output:
+```
+$ git commit -m "Add auth endpoint"
+Session saved at a1b2c3d4
+[main a1b2c3d4] Add auth endpoint
+ 2 files changed, 45 insertions(+)
+```
+
 ## How it works
 
 1. **Sessions are vectors** - When you save a session, the task/context/next_steps are embedded and stored in Qdrant
 2. **Restore by time or meaning** - No query = most recent by timestamp. With query = semantic similarity search
 3. **Environments isolate context** - Each environment has its own session history
 4. **MCP routing** - Token-based routing lets multiple Claude instances work against different environments simultaneously
+5. **Auto-save on thresholds** - Token monitoring triggers saves before context overflow
