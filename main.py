@@ -1,5 +1,5 @@
 """
-mcp-contexts: Multi-environment session state management for Claude.
+contexts-mcp: Multi-environment session state management for Claude.
 
 Provides:
 - Session memory with semantic search (ss/rs workflow)
@@ -42,7 +42,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 app = FastAPI(
-    title="mcp-contexts",
+    title="contexts-mcp",
     description="Multi-environment session state management for Claude",
 )
 
@@ -324,7 +324,7 @@ async def mcp_sse(request: Request, token: Optional[str] = Query(None)):
     """
     MCP SSE endpoint that establishes a session and provides the messages endpoint.
 
-    The backend mcp-relay uses a custom (non-MCP) SSE format, so we don't proxy it.
+    The backend relay-mcp uses a custom (non-MCP) SSE format, so we don't proxy it.
     Instead, we implement proper MCP SSE transport ourselves.
 
     Token-based routing:
@@ -393,10 +393,10 @@ async def mcp_messages(
     token: Optional[str] = Query(None),
 ):
     """
-    Translate MCP JSON-RPC protocol to mcp-relay's custom API.
+    Translate MCP JSON-RPC protocol to relay-mcp's custom API.
 
     mcp-remote sends: {"jsonrpc": "2.0", "method": "tools/call", "params": {...}}
-    mcp-relay expects: POST /mcp/tools/call with {"name": "...", "arguments": {...}}
+    relay-mcp expects: POST /mcp/tools/call with {"name": "...", "arguments": {...}}
 
     Routing priority:
     1. If token provided and valid, use token's environment
@@ -452,7 +452,7 @@ async def mcp_messages(
                 result = {"jsonrpc": "2.0", "id": rpc_id, "result": {}}
 
             elif method == "tools/list":
-                # Fetch tools from mcp-relay's /api/tools
+                # Fetch tools from relay-mcp's /api/tools
                 response = await client.get(f"{backend_url}/api/tools")
                 if response.status_code == 200:
                     tools_data = response.json()
@@ -488,7 +488,7 @@ async def mcp_messages(
                     }
 
             elif method == "tools/call":
-                # Translate to mcp-relay's /mcp/tools/call
+                # Translate to relay-mcp's /mcp/tools/call
                 tool_name = params.get("name", "")
                 arguments = params.get("arguments", {})
 
@@ -502,7 +502,7 @@ async def mcp_messages(
 
                 if response.status_code == 200:
                     relay_result = response.json()
-                    # mcp-relay returns {"content": [...]} format
+                    # relay-mcp returns {"content": [...]} format
                     result = {"jsonrpc": "2.0", "id": rpc_id, "result": relay_result}
                 else:
                     error_detail = response.text

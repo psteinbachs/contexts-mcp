@@ -1,4 +1,4 @@
-# mcp-contexts
+# contexts-mcp
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
@@ -20,14 +20,14 @@ Save your working context, close Claude, come back days later, and pick up exact
 ### One-liner install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/psteinbachs/mcp-contexts/main/setup/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/psteinbachs/contexts-mcp/main/setup/install.sh | bash
 ```
 
 ### Or manual deploy
 
 ```bash
-git clone https://github.com/psteinbachs/mcp-contexts.git
-cd mcp-contexts
+git clone https://github.com/psteinbachs/contexts-mcp.git
+cd contexts-mcp
 cp config.example.yaml config.yaml
 # Edit config.yaml with your environments
 docker compose up -d
@@ -40,7 +40,7 @@ Each environment points to an MCP relay (or any MCP server) and can have custom 
 ```yaml
 environments:
   dev:
-    url: http://mcp-relay:8000        # Your MCP server
+    url: http://relay-mcp:8000        # Your MCP server
     description: Development environment
     context:
       networks:
@@ -202,7 +202,7 @@ default_environment: dev
 
 environments:
   dev:
-    url: http://mcp-relay:8000
+    url: http://relay-mcp:8000
     description: Development environment
     context:
       networks:
@@ -234,9 +234,9 @@ embedding:
 ```yaml
 # docker-compose.yml
 services:
-  mcp-contexts:
+  contexts-mcp:
     build: .
-    container_name: mcp-contexts
+    container_name: contexts-mcp
     restart: unless-stopped
     ports:
       - "8100:8000"

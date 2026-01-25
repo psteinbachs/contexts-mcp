@@ -1,7 +1,7 @@
 services:
-  mcp-contexts:
+  contexts-mcp:
     build: .
-    container_name: mcp-contexts
+    container_name: contexts-mcp
     restart: unless-stopped
     ports:
       - "8100:8000"

@@ -1,11 +1,11 @@
-# mcp-contexts configuration example
+# contexts-mcp configuration example
 # Copy to config.yaml and customize for your environment
 
 default_environment: homelab
 
 environments:
   homelab:
-    url: http://mcp-relay:8000
+    url: http://relay-mcp:8000
     description: Personal infrastructure
     context:
       networks:

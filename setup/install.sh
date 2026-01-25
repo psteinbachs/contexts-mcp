@@ -1,14 +1,14 @@
 #!/bin/bash
 set -e
 
-# mcp-contexts installer
-# Usage: curl -fsSL https://raw.githubusercontent.com/psteinbachs/mcp-contexts/main/setup/install.sh | bash
+# contexts-mcp installer
+# Usage: curl -fsSL https://raw.githubusercontent.com/psteinbachs/contexts-mcp/main/setup/install.sh | bash
 
-REPO_URL="https://github.com/psteinbachs/mcp-contexts.git"
-INSTALL_DIR="${MCP_CONTEXTS_DIR:-$HOME/.mcp-contexts}"
+REPO_URL="https://github.com/psteinbachs/contexts-mcp.git"
+INSTALL_DIR="${CONTEXTS_MCP_DIR:-$HOME/.contexts-mcp}"
 
 echo "┌─────────────────────────────────────────┐"
-echo "│  mcp-contexts installer                 │"
+echo "│  contexts-mcp installer                 │"
 echo "│  Multi-environment session management   │"
 echo "└─────────────────────────────────────────┘"
 echo
@@ -67,7 +67,7 @@ if curl -s http://localhost:8100/health | grep -q "healthy"; then
     echo "│  Installation complete!                 │"
     echo "└─────────────────────────────────────────┘"
     echo
-    echo "mcp-contexts is running at http://localhost:8100"
+    echo "contexts-mcp is running at http://localhost:8100"
     echo
     echo "Next steps:"
     echo "  1. Edit $INSTALL_DIR/config.yaml with your environments"
