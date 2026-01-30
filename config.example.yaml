@@ -7,6 +7,9 @@ environments:
   homelab:
     url: http://relay-mcp:8000
     description: Personal infrastructure
+    statusline:
+      bg_rgb: "76;86;106"     # R;G;B for status line background
+      icon: ""               # Nerd font icon
     context:
       networks:
         allowed: [192.168.0.0/16]
@@ -15,6 +18,9 @@ environments:
   prod:
     url: https://mcp.prod.example.com
     description: Production infrastructure
+    statusline:
+      bg_rgb: "191;97;106"    # Red for production/danger
+      icon: ""
     context:
       networks:
         allowed: [10.0.0.0/8]
@@ -24,6 +30,9 @@ environments:
   writing:
     url: http://localhost:8001
     description: Writing and documentation tools
+    statusline:
+      bg_rgb: "163;190;140"   # Green for safe/creative
+      icon: ""
     context:
       omega: false
 

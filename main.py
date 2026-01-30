@@ -79,6 +79,7 @@ config = load_config()
 ENVIRONMENTS = {}
 for env_name, env_config in config.get("environments", {}).items():
     ENVIRONMENTS[env_name] = {
+        "statusline": env_config.get("statusline", {}),
         "url": env_config.get("url"),
         "description": env_config.get("description", ""),
     }
@@ -223,6 +224,10 @@ async def get_env():
         "url": ENVIRONMENTS[current_env]["url"],
         "description": ENVIRONMENTS[current_env]["description"],
         "available": list(ENVIRONMENTS.keys()),
+        "statusline": {
+            name: env_config.get("statusline", {})
+            for name, env_config in ENVIRONMENTS.items()
+        },
     }
 
 
