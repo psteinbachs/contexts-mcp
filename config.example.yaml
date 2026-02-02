@@ -1,12 +1,12 @@
 # contexts-mcp configuration example
 # Copy to config.yaml and customize for your environment
 
-default_environment: homelab
+default_environment: dev
 
 environments:
-  homelab:
+  dev:
     url: http://relay-mcp:8000
-    description: Personal infrastructure
+    description: Development environment
     statusline:
       bg_rgb: "76;86;106"     # R;G;B for status line background
       icon: ""               # Nerd font icon
@@ -25,7 +25,10 @@ environments:
       networks:
         allowed: [10.0.0.0/8]
         forbidden: [192.168.0.0/16]
-      omega: true # Extra caution for production
+      omega: true  # Extra caution mode - critical_directive will be enforced
+      # Critical directives are displayed prominently at session start
+      # Use for "pain of death" rules that must be followed
+      critical_directive: "PRODUCTION DATA MUST BE PRESERVED. Before any operation: identify affected data, verify backups, know rollback path."
 
   writing:
     url: http://localhost:8001
