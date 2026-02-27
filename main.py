@@ -85,6 +85,7 @@ for env_name, env_config in config.get("environments", {}).items():
     ENVIRONMENTS[env_name] = {
         "url": env_config.get("url"),
         "description": env_config.get("description", ""),
+        "auth": env_config.get("auth"),
     }
 
 # Qdrant configuration
@@ -1636,6 +1637,7 @@ async def get_bootstrap(env: str):
         "environment": env,
         "url": env_config["url"],
         "description": env_config["description"],
+        "auth": env_config.get("auth"),
         "critical_directive": critical_directive,
         "mcp_servers": {
             "total_tools": total_tools,
