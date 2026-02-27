@@ -33,6 +33,7 @@ from qdrant_client.models import (
     FieldCondition,
     Filter,
     IsNullCondition,
+    MatchAny,
     MatchValue,
     OrderBy,
     PayloadField,
@@ -1586,6 +1587,51 @@ async def get_bootstrap(env: str):
     # Extract critical directive for top-level prominence
     critical_directive = context_config.get("critical_directive")
 
+    # Fetch high-urgency priorities for this environment
+    priorities = []
+    if qdrant_client:
+        try:
+            priority_results = qdrant_client.scroll(
+                collection_name=QDRANT_CONTEXT,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="tags",
+                            match=MatchAny(any=["urgency:high", "urgency:critical"]),
+                        ),
+                    ],
+                    should=[
+                        FieldCondition(key="environment", match=MatchValue(value=env)),
+                        IsNullCondition(is_null=PayloadField(key="environment")),
+                    ],
+                ),
+                limit=20,
+            )[0]
+
+            for r in priority_results:
+                urgency = "high"
+                for tag in (r.payload.get("tags") or []):
+                    if tag.startswith("urgency:"):
+                        urgency = tag.split(":", 1)[1]
+                priorities.append(
+                    {
+                        "category": r.payload.get("category"),
+                        "title": r.payload.get("title"),
+                        "content": r.payload.get("content"),
+                        "urgency": urgency,
+                        "tags": [
+                            t for t in (r.payload.get("tags") or [])
+                            if not t.startswith("urgency:")
+                        ],
+                    }
+                )
+
+            # Sort critical before high
+            urgency_order = {"critical": 0, "high": 1}
+            priorities.sort(key=lambda p: urgency_order.get(p["urgency"], 2))
+        except Exception as e:
+            logger.warning(f"Failed to fetch priorities: {e}")
+
     return {
         "environment": env,
         "url": env_config["url"],
@@ -1598,6 +1644,7 @@ async def get_bootstrap(env: str):
         "context": {
             "config": context_config,
             "knowledge": context_entries,
+            "priorities": priorities,
         },
     }
 
