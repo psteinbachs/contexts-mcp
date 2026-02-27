@@ -79,20 +79,20 @@ def load_config(config_path: str = None) -> dict:
 # Load configuration
 config = load_config()
 
+def _sanitize_auth(raw_auth):
+    """Whitelist auth config to known keys. Returns None if invalid."""
+    if not isinstance(raw_auth, dict) or not raw_auth.get("type"):
+        return None
+    return {k: v for k, v in raw_auth.items() if k in {"type", "profile", "env_var"}}
+
+
 # Environment configuration from config file
 ENVIRONMENTS = {}
 for env_name, env_config in config.get("environments", {}).items():
-    raw_auth = env_config.get("auth")
-    env_auth = None
-    if isinstance(raw_auth, dict) and raw_auth.get("type"):
-        env_auth = {
-            k: v for k, v in raw_auth.items()
-            if k in {"type", "profile", "env_var"}
-        }
     ENVIRONMENTS[env_name] = {
         "url": env_config.get("url"),
         "description": env_config.get("description", ""),
-        "auth": env_auth,
+        "auth": _sanitize_auth(env_config.get("auth")),
     }
 
 # Qdrant configuration
@@ -1640,18 +1640,11 @@ async def get_bootstrap(env: str):
         except Exception as e:
             logger.warning(f"Failed to fetch priorities: {e}")
 
-    # Sanitize auth config: whitelist known keys, ensure dict
-    raw_auth = env_config.get("auth")
-    auth = None
-    if isinstance(raw_auth, dict) and raw_auth.get("type"):
-        allowed_keys = {"type", "profile", "env_var"}
-        auth = {k: v for k, v in raw_auth.items() if k in allowed_keys}
-
     return {
         "environment": env,
         "url": env_config["url"],
         "description": env_config["description"],
-        "auth": auth,
+        "auth": env_config.get("auth"),  # already sanitized at startup
         "critical_directive": critical_directive,
         "mcp_servers": {
             "total_tools": total_tools,
