@@ -82,10 +82,17 @@ config = load_config()
 # Environment configuration from config file
 ENVIRONMENTS = {}
 for env_name, env_config in config.get("environments", {}).items():
+    raw_auth = env_config.get("auth")
+    env_auth = None
+    if isinstance(raw_auth, dict) and raw_auth.get("type"):
+        env_auth = {
+            k: v for k, v in raw_auth.items()
+            if k in {"type", "profile", "env_var"}
+        }
     ENVIRONMENTS[env_name] = {
         "url": env_config.get("url"),
         "description": env_config.get("description", ""),
-        "auth": env_config.get("auth"),
+        "auth": env_auth,
     }
 
 # Qdrant configuration
@@ -1633,11 +1640,18 @@ async def get_bootstrap(env: str):
         except Exception as e:
             logger.warning(f"Failed to fetch priorities: {e}")
 
+    # Sanitize auth config: whitelist known keys, ensure dict
+    raw_auth = env_config.get("auth")
+    auth = None
+    if isinstance(raw_auth, dict) and raw_auth.get("type"):
+        allowed_keys = {"type", "profile", "env_var"}
+        auth = {k: v for k, v in raw_auth.items() if k in allowed_keys}
+
     return {
         "environment": env,
         "url": env_config["url"],
         "description": env_config["description"],
-        "auth": env_config.get("auth"),
+        "auth": auth,
         "critical_directive": critical_directive,
         "mcp_servers": {
             "total_tools": total_tools,
