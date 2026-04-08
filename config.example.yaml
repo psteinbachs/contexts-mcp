@@ -3,13 +3,32 @@
 
 default_environment: dev
 
+## Per-environment auth (billing separation)
+#
+# LIMITATION: Claude Code binds to one identity at startup. The auth config
+# below is returned in the bootstrap response so your launch wrapper can set
+# the right API key BEFORE starting Claude Code. Mid-session switching between
+# Anthropic orgs/accounts is not supported by Claude Code.
+#
+# Recommended approach:
+#   1. Store per-environment API keys in a env file (e.g. ~/.claude/env/anthropic-keys.env)
+#   2. Use a launch wrapper that reads CLAUDE_MCP_ENV, looks up the key, and
+#      exports ANTHROPIC_API_KEY before exec'ing claude
+#   3. If you load an environment that needs a different key than what you
+#      launched with, the bootstrap will warn about the mismatch
+#
+# Auth types:
+#   api_key:  env_var names the environment variable holding the key
+#   (oauth profile switching was planned but is not implementable — Claude Code
+#    does not support credential file hot-swapping)
+
 environments:
   dev:
     url: http://relay-mcp:8000
     description: Development environment
     auth:
-      type: oauth             # Switch Claude Code credentials on launch
-      profile: personal       # Maps to ~/.claude/credentials/personal.json
+      type: api_key
+      env_var: ANTHROPIC_KEY_DEV
     statusline:
       bg_rgb: "76;86;106"     # R;G;B for status line background
       icon: ""               # Nerd font icon
@@ -22,8 +41,8 @@ environments:
     url: https://mcp.prod.example.com
     description: Production infrastructure
     auth:
-      type: oauth
-      profile: work           # Maps to ~/.claude/credentials/work.json
+      type: api_key
+      env_var: ANTHROPIC_KEY_PROD
     statusline:
       bg_rgb: "191;97;106"    # Red for production/danger
       icon: ""
@@ -39,9 +58,7 @@ environments:
   writing:
     url: http://localhost:8001
     description: Writing and documentation tools
-    # auth:                   # No auth block = no credential switching
-    #   type: api_key         # Alternative: use an API key instead of OAuth
-    #   env_var: ANTHROPIC_API_KEY_WRITING  # Name of env var holding the key
+    # auth:                   # No auth block = no credential switching (uses default)
     statusline:
       bg_rgb: "163;190;140"   # Green for safe/creative
       icon: ""

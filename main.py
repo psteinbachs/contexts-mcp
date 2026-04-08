@@ -80,10 +80,17 @@ def load_config(config_path: str = None) -> dict:
 config = load_config()
 
 def _sanitize_auth(raw_auth):
-    """Whitelist auth config to known keys. Returns None if invalid."""
+    """Whitelist auth config to known keys. Returns None if invalid.
+
+    Only api_key type is supported. The auth config is returned in the
+    bootstrap response so launch wrappers can set the right ANTHROPIC_API_KEY
+    before starting Claude Code. Mid-session switching is not supported.
+    """
     if not isinstance(raw_auth, dict) or not raw_auth.get("type"):
         return None
-    return {k: v for k, v in raw_auth.items() if k in {"type", "profile", "env_var"}}
+    if raw_auth["type"] not in ("api_key",):
+        return None
+    return {k: v for k, v in raw_auth.items() if k in {"type", "env_var"}}
 
 
 # Environment configuration from config file
