@@ -18,7 +18,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import httpx
@@ -140,9 +140,37 @@ session_map: dict[str, dict] = {}
 # Lock for thread-safe session_map access
 session_map_lock = asyncio.Lock()
 
-# Token-based routing: token -> {env, created_at}
+# Token-based routing: token -> {env, created_at, expires_at}
 # Tokens are long-lived and persist across SSE connections
 sessions: dict[str, dict] = {}
+
+# Token TTL: 24h is plenty for a coding session; reaped on issue.
+SESSION_TTL_SECONDS = 86400
+
+
+def _issue_session_token(env: str) -> str:
+    """Create a new session token, reaping expired ones first."""
+    now = datetime.now(timezone.utc)
+    expired = []
+    for t, s in sessions.items():
+        exp = s.get("expires_at")
+        if not exp:
+            continue
+        try:
+            if datetime.fromisoformat(exp) < now:
+                expired.append(t)
+        except (ValueError, TypeError):
+            expired.append(t)  # malformed -> treat as expired
+    for t in expired:
+        sessions.pop(t, None)
+
+    token = str(uuid.uuid4())
+    sessions[token] = {
+        "env": env,
+        "created_at": now.isoformat(),
+        "expires_at": (now + timedelta(seconds=SESSION_TTL_SECONDS)).isoformat(),
+    }
+    return token
 
 
 class SessionState(BaseModel):
@@ -320,12 +348,7 @@ async def create_session_token(env: str):
     if env not in ENVIRONMENTS:
         raise HTTPException(status_code=400, detail=f"Unknown environment: {env}")
 
-    token = str(uuid.uuid4())
-    sessions[token] = {
-        "env": env,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-
+    token = _issue_session_token(env)
     logger.info(f"Session token created: {token[:8]}... -> {env}")
 
     return {
@@ -1707,7 +1730,42 @@ async def get_bootstrap(env: str):
     }
 
 
-@app.get("/full-context/{env}")
+async def _fetch_last_session(env: str) -> Optional[dict]:
+    if not qdrant_client:
+        return None
+    try:
+        search_filter = Filter(
+            must=[FieldCondition(key="environment", match=MatchValue(value=env))],
+            must_not=[FieldCondition(key="auto_save", match=MatchValue(value=True))]
+        )
+        results, _ = qdrant_client.scroll(
+            collection_name=QDRANT_SESSIONS,
+            scroll_filter=search_filter,
+            limit=1,
+            order_by=OrderBy(key="timestamp", direction=Direction.DESC),
+            with_payload=True,
+            with_vectors=False,
+        )
+        if not results:
+            return None
+        r = results[0]
+        return {
+            "id": r.id,
+            "environment": r.payload.get("environment"),
+            "task": r.payload.get("task"),
+            "context": r.payload.get("context"),
+            "blockers": r.payload.get("blockers"),
+            "next_steps": r.payload.get("next_steps"),
+            "tags": r.payload.get("tags"),
+            "key_artifacts": r.payload.get("key_artifacts"),
+            "timestamp": r.payload.get("timestamp"),
+        }
+    except Exception as e:
+        logger.warning(f"Failed to restore last session: {e}")
+        return None
+
+
+@app.post("/full-context/{env}")
 async def get_full_context(env: str):
     """
     One-shot initialization endpoint.
@@ -1716,52 +1774,25 @@ async def get_full_context(env: str):
     if env not in ENVIRONMENTS:
         raise HTTPException(status_code=404, detail=f"Unknown environment: {env}")
 
-    # 1. Create Session Token
-    token = str(uuid.uuid4())
-    sessions[token] = {
-        "env": env,
-        "created_at": datetime.now(timezone.utc).isoformat(),
-    }
-    
-    # 2. Get Bootstrap Data
+    token = _issue_session_token(env)
     env_config = ENVIRONMENTS[env]
-    backend_url = env_config["url"]
     context_config = config.get("environments", {}).get(env, {}).get("context", {})
 
-    mcp_data = await _fetch_mcp_servers(backend_url)
-    ctx_data = await _fetch_context_and_priorities(env)
-
-    # 3. Restore Last Session
-    last_session = None
-    if qdrant_client:
-        try:
-            search_filter = Filter(
-                must=[FieldCondition(key="environment", match=MatchValue(value=env))],
-                must_not=[FieldCondition(key="auto_save", match=MatchValue(value=True))]
-            )
-            results, _ = qdrant_client.scroll(
-                collection_name=QDRANT_SESSIONS,
-                scroll_filter=search_filter,
-                limit=1,
-                order_by=OrderBy(key="timestamp", direction=Direction.DESC),
-                with_payload=True,
-                with_vectors=False,
-            )
-            if results:
-                r = results[0]
-                last_session = {
-                    "id": r.id,
-                    "environment": r.payload.get("environment"),
-                    "task": r.payload.get("task"),
-                    "context": r.payload.get("context"),
-                    "blockers": r.payload.get("blockers"),
-                    "next_steps": r.payload.get("next_steps"),
-                    "tags": r.payload.get("tags"),
-                    "key_artifacts": r.payload.get("key_artifacts"),
-                    "timestamp": r.payload.get("timestamp"),
-                }
-        except Exception as e:
-            logger.warning(f"Failed to restore last session: {e}")
+    mcp_data, ctx_data, last_session = await asyncio.gather(
+        _fetch_mcp_servers(env_config["url"]),
+        _fetch_context_and_priorities(env),
+        _fetch_last_session(env),
+        return_exceptions=True,
+    )
+    if isinstance(mcp_data, BaseException):
+        logger.warning(f"mcp_servers fetch failed: {mcp_data}")
+        mcp_data = {"total_tools": 0, "servers": []}
+    if isinstance(ctx_data, BaseException):
+        logger.warning(f"context fetch failed: {ctx_data}")
+        ctx_data = {"knowledge": [], "priorities": []}
+    if isinstance(last_session, BaseException):
+        logger.warning(f"last_session fetch failed: {last_session}")
+        last_session = None
 
     return {
         "token": token,
