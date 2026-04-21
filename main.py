@@ -82,15 +82,23 @@ config = load_config()
 def _sanitize_auth(raw_auth):
     """Whitelist auth config to known keys. Returns None if invalid.
 
-    Only api_key type is supported. The auth config is returned in the
-    bootstrap response so launch wrappers can set the right ANTHROPIC_API_KEY
-    before starting Claude Code. Mid-session switching is not supported.
+    Supported types:
+      oauth   — profile names a credential file in ~/.claude/credentials/<profile>.json
+      api_key — env_var names an environment variable holding an API key
+
+    The auth config is returned in the bootstrap response so launch wrappers
+    can switch credentials before starting Claude Code.
     """
     if not isinstance(raw_auth, dict) or not raw_auth.get("type"):
         return None
-    if raw_auth["type"] not in ("api_key",):
+    allowed = {
+        "oauth": {"type", "profile"},
+        "api_key": {"type", "env_var"},
+    }
+    keys = allowed.get(raw_auth["type"])
+    if keys is None:
         return None
-    return {k: v for k, v in raw_auth.items() if k in {"type", "env_var"}}
+    return {k: v for k, v in raw_auth.items() if k in keys}
 
 
 # Environment configuration from config file
@@ -1533,26 +1541,7 @@ async def delete_context(point_id: int):
     return {"status": "deleted", "id": point_id}
 
 
-@app.get("/bootstrap/{env}")
-async def get_bootstrap(env: str):
-    """
-    Get minimal bootstrap context for a Claude session.
-
-    Returns:
-    - Environment config from YAML (url, description, context settings)
-    - Top relevant context entries from qdrant for this environment
-    - MCP servers registered with the backend relay (tools summary)
-    """
-    if env not in ENVIRONMENTS:
-        raise HTTPException(status_code=404, detail=f"Unknown environment: {env}")
-
-    env_config = ENVIRONMENTS[env]
-    backend_url = env_config["url"]
-
-    # Get environment-specific context from config
-    context_config = config.get("environments", {}).get(env, {}).get("context", {})
-
-    # Fetch MCP servers from backend relay-mcp
+async def _fetch_mcp_servers(backend_url: str) -> dict:
     mcp_servers = []
     total_tools = 0
     async with httpx.AsyncClient(timeout=10.0) as client:
@@ -1571,12 +1560,14 @@ async def get_bootstrap(env: str):
                         })
         except Exception as e:
             logger.warning(f"Failed to fetch MCP servers from {backend_url}: {e}")
+    return {"total_tools": total_tools, "servers": mcp_servers}
 
-    # Fetch global context from qdrant (facts tagged "global" for this environment)
+
+async def _fetch_context_and_priorities(env: str) -> dict:
     context_entries = []
+    priorities = []
     if qdrant_client:
         try:
-            # Get facts tagged "global" for this environment
             global_results = qdrant_client.scroll(
                 collection_name=QDRANT_CONTEXT,
                 scroll_filter=Filter(
@@ -1587,17 +1578,69 @@ async def get_bootstrap(env: str):
                 ),
                 limit=10,
             )[0]
-
             for r in global_results:
-                context_entries.append(
-                    {
-                        "category": r.payload.get("category"),
-                        "title": r.payload.get("title"),
-                        "content": r.payload.get("content"),
-                    }
-                )
+                context_entries.append({
+                    "category": r.payload.get("category"),
+                    "title": r.payload.get("title"),
+                    "content": r.payload.get("content"),
+                })
         except Exception as e:
             logger.warning(f"Failed to fetch global context: {e}")
+
+        try:
+            priority_results = qdrant_client.scroll(
+                collection_name=QDRANT_CONTEXT,
+                scroll_filter=Filter(
+                    must=[
+                        FieldCondition(
+                            key="tags",
+                            match=MatchAny(any=["urgency:high", "urgency:critical"]),
+                        ),
+                    ],
+                    should=[
+                        FieldCondition(key="environment", match=MatchValue(value=env)),
+                        IsNullCondition(is_null=PayloadField(key="environment")),
+                    ],
+                ),
+                limit=20,
+            )[0]
+            for r in priority_results:
+                urgency = "high"
+                for tag in (r.payload.get("tags") or []):
+                    if tag.startswith("urgency:"):
+                        urgency = tag.split(":", 1)[1]
+                priorities.append({
+                    "category": r.payload.get("category"),
+                    "title": r.payload.get("title"),
+                    "content": r.payload.get("content"),
+                    "urgency": urgency,
+                    "tags": [t for t in (r.payload.get("tags") or []) if not t.startswith("urgency:")],
+                })
+            priorities.sort(key=lambda p: {"critical": 0, "high": 1}.get(p["urgency"], 2))
+        except Exception as e:
+            logger.warning(f"Failed to fetch priorities: {e}")
+    return {"knowledge": context_entries, "priorities": priorities}
+
+
+@app.get("/bootstrap/{env}")
+async def get_bootstrap(env: str):
+    """
+    Get minimal bootstrap context for a Claude session.
+    """
+    if env not in ENVIRONMENTS:
+        raise HTTPException(status_code=404, detail=f"Unknown environment: {env}")
+
+    env_config = ENVIRONMENTS[env]
+    backend_url = env_config["url"]
+
+    # Get environment-specific context from config
+    context_config = config.get("environments", {}).get(env, {}).get("context", {})
+
+    # Fetch MCP servers
+    mcp_data = await _fetch_mcp_servers(backend_url)
+
+    # Fetch context and priorities
+    ctx_data = await _fetch_context_and_priorities(env)
 
     # Extract critical directive for top-level prominence
     critical_directive = context_config.get("critical_directive")
@@ -1612,7 +1655,6 @@ async def get_bootstrap(env: str):
                     must=[
                         FieldCondition(
                             key="tags",
-                            match=MatchAny(any=["urgency:high", "urgency:critical"]),
                         ),
                     ],
                     should=[
@@ -1654,14 +1696,87 @@ async def get_bootstrap(env: str):
         "auth": env_config.get("auth"),  # already sanitized at startup
         "critical_directive": critical_directive,
         "mcp_servers": {
-            "total_tools": total_tools,
-            "servers": mcp_servers,
+            "total_tools": mcp_data["total_tools"],
+            "servers": mcp_data["servers"],
         },
         "context": {
             "config": context_config,
-            "knowledge": context_entries,
+            "knowledge": ctx_data["knowledge"],
             "priorities": priorities,
         },
+    }
+
+
+@app.get("/full-context/{env}")
+async def get_full_context(env: str):
+    """
+    One-shot initialization endpoint.
+    Generates a token, retrieves bootstrap context, and restores the latest session.
+    """
+    if env not in ENVIRONMENTS:
+        raise HTTPException(status_code=404, detail=f"Unknown environment: {env}")
+
+    # 1. Create Session Token
+    token = str(uuid.uuid4())
+    sessions[token] = {
+        "env": env,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+    }
+    
+    # 2. Get Bootstrap Data
+    env_config = ENVIRONMENTS[env]
+    backend_url = env_config["url"]
+    context_config = config.get("environments", {}).get(env, {}).get("context", {})
+
+    mcp_data = await _fetch_mcp_servers(backend_url)
+    ctx_data = await _fetch_context_and_priorities(env)
+
+    # 3. Restore Last Session
+    last_session = None
+    if qdrant_client:
+        try:
+            search_filter = Filter(
+                must=[FieldCondition(key="environment", match=MatchValue(value=env))],
+                must_not=[FieldCondition(key="auto_save", match=MatchValue(value=True))]
+            )
+            results, _ = qdrant_client.scroll(
+                collection_name=QDRANT_SESSIONS,
+                scroll_filter=search_filter,
+                limit=1,
+                order_by=OrderBy(key="timestamp", direction=Direction.DESC),
+                with_payload=True,
+                with_vectors=False,
+            )
+            if results:
+                r = results[0]
+                last_session = {
+                    "id": r.id,
+                    "environment": r.payload.get("environment"),
+                    "task": r.payload.get("task"),
+                    "context": r.payload.get("context"),
+                    "blockers": r.payload.get("blockers"),
+                    "next_steps": r.payload.get("next_steps"),
+                    "tags": r.payload.get("tags"),
+                    "key_artifacts": r.payload.get("key_artifacts"),
+                    "timestamp": r.payload.get("timestamp"),
+                }
+        except Exception as e:
+            logger.warning(f"Failed to restore last session: {e}")
+
+    return {
+        "token": token,
+        "environment": env,
+        "url": env_config["url"],
+        "description": env_config["description"],
+        "auth": env_config.get("auth"),
+        "critical_directive": context_config.get("critical_directive"),
+        "mcp_servers": mcp_data,
+        "context": {
+            "config": context_config,
+            "knowledge": ctx_data["knowledge"],
+            "priorities": ctx_data["priorities"],
+        },
+        "last_session": last_session,
     }
 
 

@@ -5,30 +5,29 @@ default_environment: dev
 
 ## Per-environment auth (billing separation)
 #
-# LIMITATION: Claude Code binds to one identity at startup. The auth config
-# below is returned in the bootstrap response so your launch wrapper can set
-# the right API key BEFORE starting Claude Code. Mid-session switching between
-# Anthropic orgs/accounts is not supported by Claude Code.
+# Claude Code binds to one identity at startup. The auth config below tells
+# the launch wrapper which credential profile to load BEFORE starting Claude
+# Code. Mid-session switching is not supported.
 #
-# Recommended approach:
-#   1. Store per-environment API keys in a env file (e.g. ~/.claude/env/anthropic-keys.env)
-#   2. Use a launch wrapper that reads CLAUDE_MCP_ENV, looks up the key, and
-#      exports ANTHROPIC_API_KEY before exec'ing claude
-#   3. If you load an environment that needs a different key than what you
+# How it works:
+#   1. Log into each Anthropic account once via `claude` (creates ~/.claude/.credentials.json)
+#   2. Save each as a named profile: cp ~/.claude/.credentials.json ~/.claude/credentials/<profile>.json
+#   3. A launch wrapper reads CLAUDE_MCP_ENV, maps it to a profile, and copies
+#      the right credentials file into ~/.claude/.credentials.json before exec'ing claude
+#   4. If you load an environment that needs a different profile than what you
 #      launched with, the bootstrap will warn about the mismatch
 #
 # Auth types:
-#   api_key:  env_var names the environment variable holding the key
-#   (oauth profile switching was planned but is not implementable — Claude Code
-#    does not support credential file hot-swapping)
+#   oauth:    profile names a credential file in ~/.claude/credentials/<profile>.json
+#   api_key:  env_var names an environment variable holding an API key (pay-per-token)
 
 environments:
   dev:
     url: http://relay-mcp:8000
     description: Development environment
     auth:
-      type: api_key
-      env_var: ANTHROPIC_KEY_DEV
+      type: oauth
+      profile: personal       # ~/.claude/credentials/personal.json
     statusline:
       bg_rgb: "76;86;106"     # R;G;B for status line background
       icon: ""               # Nerd font icon
@@ -41,8 +40,8 @@ environments:
     url: https://mcp.prod.example.com
     description: Production infrastructure
     auth:
-      type: api_key
-      env_var: ANTHROPIC_KEY_PROD
+      type: oauth
+      profile: work           # ~/.claude/credentials/work.json
     statusline:
       bg_rgb: "191;97;106"    # Red for production/danger
       icon: ""
