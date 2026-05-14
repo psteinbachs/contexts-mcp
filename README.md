@@ -167,12 +167,14 @@ Store persistent knowledge that outlives individual sessions:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/context` | POST | Store knowledge |
-| `/context` | GET | Search knowledge |
+| `/context` | GET | Search knowledge (semantic + optional filters) |
 | `/context/{id}` | DELETE | Remove knowledge |
-| `/bootstrap/{env}` | GET | Get environment context for new sessions |
+| `/bootstrap/{env}` | GET | Environment context (config + knowledge + priorities) |
+| `/full-context/{env}` | POST | One-shot bootstrap: issues a token and fans out MCP servers, knowledge, priorities, and last session in parallel |
 
 **Store context:**
 ```bash
+# Environment-scoped entry (visible when querying this env)
 curl -X POST http://localhost:8100/context \
   -H "Content-Type: application/json" \
   -d '{
@@ -181,7 +183,39 @@ curl -X POST http://localhost:8100/context \
     "title": "API authentication flow",
     "content": "We use JWT tokens stored in httpOnly cookies..."
   }'
+
+# Global entry — omit "environment" (or set to null). Globals show up in
+# every environment's search results, so use them for cross-cutting rules
+# and conventions, not env-specific facts.
+curl -X POST http://localhost:8100/context \
+  -H "Content-Type: application/json" \
+  -d '{
+    "category": "convention",
+    "title": "API error format",
+    "content": "All services return RFC 7807 Problem Details on error."
+  }'
 ```
+
+**Search context:**
+```bash
+# Query a single env — returns entries for that env PLUS globals (env=null).
+# Globals are cross-cutting by design, so they appear in every env's results.
+curl "http://localhost:8100/context?query=auth&environment=dev&limit=10"
+
+# Query "global" — returns ONLY the cross-cutting entries (env=null).
+curl "http://localhost:8100/context?query=auth&environment=global&limit=10"
+
+# Query without env — returns everything ranked by similarity.
+curl "http://localhost:8100/context?query=auth&limit=10"
+```
+
+**Bootstrap a new session (one-shot):**
+```bash
+curl -X POST http://localhost:8100/full-context/dev
+```
+Response includes a fresh session token, the environment's MCP servers,
+config-level critical directive, high/critical-urgency priorities, the most
+recent saved session, and a pre-rendered `summary` object for easy display.
 
 ### MCP Proxy
 
@@ -190,6 +224,9 @@ Routes MCP calls to the active environment's relay:
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/session/{env}` | POST | Create environment-bound token |
+| `/session/{token}` | GET / DELETE | Inspect or revoke a token |
+| `/sessions/tokens` | GET | List active tokens |
+| `/env` / `/env/{name}` | GET / POST | Read or set the active environment |
 | `/mcp/sse` | GET | SSE proxy to environment's relay |
 | `/mcp/messages` | POST | MCP message proxy |
 | `/health` | GET | Health check |
@@ -204,20 +241,35 @@ environments:
   dev:
     url: http://relay-mcp:8000
     description: Development environment
+    auth:                              # optional — per-env credential profile
+      type: oauth
+      profile: personal                # ~/.claude/credentials/personal.json
+    statusline:                        # optional — colors used by hooks
+      bg_rgb: "76;86;106"
+      icon: ""
     context:
       networks:
-        allowed: [192.168.0.0/16]    # Networks Claude can access
-        forbidden: []                 # Networks to warn about
-      omega: false                    # true = extra caution warnings
+        allowed: [192.168.0.0/16]      # Networks Claude can access
+        forbidden: []                   # Networks to warn about
+      omega: false                      # true = extra caution warnings
 
   prod:
     url: https://mcp.prod.example.com
     description: Production infrastructure
+    auth:
+      type: oauth
+      profile: work
+    statusline:
+      bg_rgb: "191;97;106"             # red for danger
+      icon: ""
     context:
       networks:
         allowed: [10.0.0.0/8]
         forbidden: [192.168.0.0/16]
       omega: true
+      # critical_directive surfaces prominently in /full-context responses
+      # and is intended for "pain of death" rules that must be followed.
+      critical_directive: "PRODUCTION DATA MUST BE PRESERVED. Before any operation: identify affected data, verify backups, know rollback path."
 
 qdrant:
   url: http://qdrant:6333
@@ -228,6 +280,9 @@ qdrant:
 embedding:
   model: sentence-transformers/all-MiniLM-L6-v2
 ```
+
+See `config.example.yaml` for the full annotated example, including
+`api_key` auth (for CI/headless use) and the `auto_context` thresholds.
 
 ## Deployment
 
@@ -342,6 +397,7 @@ Session saved at a1b2c3d4
 
 1. **Sessions are vectors** - When you save a session, the task/context/next_steps are embedded and stored in Qdrant
 2. **Restore by time or meaning** - No query = most recent by timestamp. With query = semantic similarity search
-3. **Environments isolate context** - Each environment has its own session history
+3. **Environments isolate sessions, share globals** - Each environment has its own *session* history. *Knowledge* entries (`/context`) are env-scoped by default, but entries stored without an environment are treated as cross-cutting "globals" and surface in every env's search results.
 4. **MCP routing** - Token-based routing lets multiple Claude instances work against different environments simultaneously
-5. **Auto-save on thresholds** - Token monitoring triggers saves before context overflow
+5. **One-shot bootstrap** - `/full-context/{env}` issues a token and fans out MCP servers, knowledge, priorities, and last session in parallel, returning a single response with a pre-rendered `summary` for display
+6. **Auto-save on thresholds** - Token monitoring triggers saves before context overflow
