@@ -1794,6 +1794,21 @@ async def get_full_context(env: str):
         logger.warning(f"last_session fetch failed: {last_session}")
         last_session = None
 
+    # Build summary for easy client reading
+    last_session_summary = {
+        "task": last_session.get("task") if last_session else "None",
+        "context": last_session.get("context") if last_session else "None",
+        "next_steps": last_session.get("next_steps") if last_session else "None",
+        "key_artifacts": last_session.get("key_artifacts", []) if last_session else []
+    }
+
+    summary = {
+        "critical_directive": context_config.get("critical_directive") or "None",
+        "mcp_servers": [f"{s.get('name', 'unknown')}: {s.get('tools', 0)} tools ({s.get('status', 'unknown')})" for s in mcp_data.get("servers", [])],
+        "priorities": ctx_data.get("priorities", []),
+        "last_session": last_session_summary
+    }
+
     return {
         "token": token,
         "environment": env,
@@ -1808,6 +1823,7 @@ async def get_full_context(env: str):
             "priorities": ctx_data["priorities"],
         },
         "last_session": last_session,
+        "summary": summary,
     }
 
 
