@@ -1441,6 +1441,30 @@ async def purge_auto_saves(environment: Optional[str] = None, dry_run: bool = Tr
 # --- Context Memory Endpoints ---
 
 
+def _build_env_filter(environment: str):
+    """
+    Build a qdrant filter condition for the context-memory `environment` field.
+
+    Entries with environment=None are considered "global" — they apply across
+    every environment, not just one. So an environment-scoped query should
+    return entries for that env OR entries with no env set.
+
+    Conventions:
+      - environment="global"  → match only globals (entries with env=None).
+      - environment="<env>"   → match that env's entries plus globals.
+
+    Returned condition is intended to be appended to a Filter.must list.
+    """
+    if environment == "global":
+        return IsNullCondition(is_null=PayloadField(key="environment"))
+    return Filter(
+        should=[
+            FieldCondition(key="environment", match=MatchValue(value=environment)),
+            IsNullCondition(is_null=PayloadField(key="environment")),
+        ]
+    )
+
+
 @app.post("/context")
 async def save_context(entry: ContextEntry):
     """
@@ -1511,10 +1535,7 @@ async def search_context(
     # Build filter conditions
     must_conditions = []
     if environment:
-        # Match specific env OR global (null environment)
-        must_conditions.append(
-            FieldCondition(key="environment", match=MatchValue(value=environment))
-        )
+        must_conditions.append(_build_env_filter(environment))
     if category:
         must_conditions.append(
             FieldCondition(key="category", match=MatchValue(value=category))
