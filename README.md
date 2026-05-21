@@ -3,16 +3,22 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
 
-Multi-environment session state management for Claude.
+Multi-environment session state management for AI coding assistants.
+
+Tested in production with **Claude Code** and **opencode**; works with
+any assistant that reads a project-instructions file and can shell out
+to `curl`.
 
 ## What it does
 
-Save your working context, close Claude, come back days later, and pick up exactly where you left off - with full semantic search across your session history.
+Save your working context, close the assistant, come back days later,
+and pick up exactly where you left off — with full semantic search
+across your session history.
 
 - **Session memory** - `ss` saves task, context, blockers, next_steps to qdrant
 - **Session restore** - `rs <env>` gets most recent, or `rs <env> "query"` searches semantically
 - **Multi-environment** - Route to different MCP relays (dev, prod, staging, etc.)
-- **Concurrent sessions** - Token-based routing so multiple Claude instances can run independently
+- **Concurrent sessions** - Token-based routing so multiple assistant instances can run independently
 - **Bootstrap context** - `/bootstrap/{env}` provides environment-specific context for new sessions
 
 ## Quick Start
@@ -54,27 +60,37 @@ environments:
       networks:
         allowed: [10.0.0.0/8]
         forbidden: [192.168.0.0/16]
-      omega: true                      # Triggers extra caution in Claude
+      omega: true                      # Surface a critical-directive guard at session start
 ```
 
-### 3. Add session commands to your CLAUDE.md
+### 3. Add session commands to your assistant's instructions
+
+The runtime contract is identical across assistants — they just read
+the recipe out of different files:
+
+| Assistant      | Instructions file           |
+|----------------|-----------------------------|
+| Claude Code    | `CLAUDE.md` (project) / `~/.claude/CLAUDE.md` (global) |
+| opencode       | `AGENTS.md`                 |
+| Codex / Cursor | `AGENTS.md`                 |
+
+Drop this block into whichever file your assistant reads:
 
 ```markdown
 ## Session Restore (rs)
 
 **`rs`** - Prompts for environment, then restores most recent session
-**`rs <env>`** - Loads environment and restores most recent session  
+**`rs <env>`** - Loads environment and restores most recent session
 **`rs <env> "<query>"`** - Loads environment and searches for specific session
 
 ### When user types `rs <env>`:
-1. Read `~/.claude/env/<env>.md` for bootstrap context (optional)
-2. Restore most recent session:
+1. Restore most recent session:
    ```bash
    curl -s -X POST http://localhost:8100/rs \
      -H "Content-Type: application/json" \
      -d '{"environment": "<env>", "limit": 1}'
    ```
-3. Display session context and confirm ready to continue
+2. Display session context and confirm ready to continue
 
 ## Session Save (ss)
 
@@ -88,6 +104,9 @@ environments:
      -d '{"environment": "<env>", "task": "<current task>", "context": "<relevant details>", "next_steps": "<what comes next>"}'
    ```
 ```
+
+Any assistant that can execute shell commands and pattern-match on
+user input can drive `ss` / `rs` from this contract.
 
 ### 4. First session - nothing to restore yet
 
@@ -110,13 +129,13 @@ curl -X POST http://localhost:8100/ss \
 Once you have sessions saved:
 
 ```bash
-# Start a new Claude session
+# Start a new assistant session
 rs dev                      # Restore most recent dev session
-                            # Claude now knows what you were doing
+                            # The assistant now knows what you were doing
 
 # ... do work ...
 
-# Before closing Claude
+# Before closing the assistant
 ss                          # Saves current task/context/next_steps
 
 # Days later, can't remember where you left off?
@@ -162,52 +181,24 @@ curl -X POST http://localhost:8100/rs \
 
 ### Context & Knowledge
 
-Store persistent knowledge that outlives individual sessions:
+Long-form context entries (knowledge that outlives an individual
+session) live in the same Qdrant collection as before, but `contexts-mcp`
+no longer exposes write or arbitrary-query HTTP endpoints for them.
+Clients write and search the collection directly with the Qdrant SDK,
+and `contexts-mcp` reads the collection on the bootstrap path to render
+priorities into session-start responses.
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/context` | POST | Store knowledge |
-| `/context` | GET | Search knowledge (semantic + optional filters) |
-| `/context/{id}` | DELETE | Remove knowledge |
-| `/bootstrap/{env}` | GET | Environment context (config + knowledge + priorities) |
-| `/full-context/{env}` | POST | One-shot bootstrap: issues a token and fans out MCP servers, knowledge, priorities, and last session in parallel |
+| `/bootstrap/{env}` | GET | Environment context (config + priorities surfaced from the collection) |
+| `/full-context/{env}` | POST | One-shot bootstrap: issues a token and fans out MCP servers, priorities, and last session in parallel |
 
-**Store context:**
-```bash
-# Environment-scoped entry (visible when querying this env)
-curl -X POST http://localhost:8100/context \
-  -H "Content-Type: application/json" \
-  -d '{
-    "environment": "dev",
-    "category": "architecture",
-    "title": "API authentication flow",
-    "content": "We use JWT tokens stored in httpOnly cookies..."
-  }'
-
-# Global entry — omit "environment" (or set to null). Globals show up in
-# every environment's search results, so use them for cross-cutting rules
-# and conventions, not env-specific facts.
-curl -X POST http://localhost:8100/context \
-  -H "Content-Type: application/json" \
-  -d '{
-    "category": "convention",
-    "title": "API error format",
-    "content": "All services return RFC 7807 Problem Details on error."
-  }'
-```
-
-**Search context:**
-```bash
-# Query a single env — returns entries for that env PLUS globals (env=null).
-# Globals are cross-cutting by design, so they appear in every env's results.
-curl "http://localhost:8100/context?query=auth&environment=dev&limit=10"
-
-# Query "global" — returns ONLY the cross-cutting entries (env=null).
-curl "http://localhost:8100/context?query=auth&environment=global&limit=10"
-
-# Query without env — returns everything ranked by similarity.
-curl "http://localhost:8100/context?query=auth&limit=10"
-```
+The previous `POST /context`, `GET /context`, and `DELETE /context/{id}`
+endpoints were thin HTTP wrappers over basic Qdrant CRUD. Clients are
+expected to embed (e.g. with `fastembed`) and upsert directly against
+their Qdrant instance — the collection name lives in
+`qdrant.collections.context` in `config.yaml` (default `global-context`,
+384-dim Cosine to match `sentence-transformers/all-MiniLM-L6-v2`).
 
 **Bootstrap a new session (one-shot):**
 ```bash
@@ -243,15 +234,15 @@ environments:
     description: Development environment
     auth:                              # optional — per-env credential profile
       type: oauth
-      profile: personal                # ~/.claude/credentials/personal.json
+      profile: personal                # credential profile loaded before the assistant starts
     statusline:                        # optional — colors used by hooks
       bg_rgb: "76;86;106"
       icon: ""
     context:
       networks:
-        allowed: [192.168.0.0/16]      # Networks Claude can access
+        allowed: [192.168.0.0/16]      # Networks the assistant is expected to reach
         forbidden: []                   # Networks to warn about
-      omega: false                      # true = extra caution warnings
+      omega: false                      # true = surface a critical-directive guard at session start
 
   prod:
     url: https://mcp.prod.example.com
@@ -322,10 +313,16 @@ Never hit context overflow again. contexts-mcp can monitor token usage and auto-
 
 ### Setup
 
-1. **Disable autoCompact** in Claude Code (recovers ~45k tokens):
+1. **Disable the assistant's own auto-compaction** so contexts-mcp can drive saves on the threshold instead.
+
+   On Claude Code (the setting recovers ~45k tokens):
    ```bash
    claude config set --global autoCompact false
    ```
+
+   On opencode / other assistants: consult their docs for the equivalent
+   "do not auto-compact" toggle, if any. The auto-save hooks below
+   work without it; you just won't get the token reclaim.
 
 2. **Configure thresholds** in config.yaml:
    ```yaml
@@ -397,7 +394,7 @@ Session saved at a1b2c3d4
 
 1. **Sessions are vectors** - When you save a session, the task/context/next_steps are embedded and stored in Qdrant
 2. **Restore by time or meaning** - No query = most recent by timestamp. With query = semantic similarity search
-3. **Environments isolate sessions, share globals** - Each environment has its own *session* history. *Knowledge* entries (`/context`) are env-scoped by default, but entries stored without an environment are treated as cross-cutting "globals" and surface in every env's search results.
-4. **MCP routing** - Token-based routing lets multiple Claude instances work against different environments simultaneously
-5. **One-shot bootstrap** - `/full-context/{env}` issues a token and fans out MCP servers, knowledge, priorities, and last session in parallel, returning a single response with a pre-rendered `summary` for display
+3. **Environments isolate sessions, share globals** - Each environment has its own *session* history. *Knowledge* entries in the context collection are env-scoped by default, but entries stored without an environment are treated as cross-cutting "globals" and surface in every env's bootstrap results.
+4. **MCP routing** - Token-based routing lets multiple assistant instances work against different environments simultaneously
+5. **One-shot bootstrap** - `/full-context/{env}` issues a token and fans out MCP servers, priorities (read from the context collection), and last session in parallel, returning a single response with a pre-rendered `summary` for display
 6. **Auto-save on thresholds** - Token monitoring triggers saves before context overflow
